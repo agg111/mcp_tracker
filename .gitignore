@@ -7,5 +7,10 @@ wheels/
 *.egg-info
 .env
 
+# Node.js
+node_modules/
+package-lock.json
+package.json
+
 # Virtual environments
 .venv
