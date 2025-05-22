@@ -23,12 +23,14 @@ interface Resource {
   name: string;
   description: string;
   mimeType: string;
+  size?: number;
+  lastModified?: number;
 }
 
 interface ServerInfo {
   name: string;
   version: string;
-  protocolVersion: string;
+  protocolVersion?: string;
 }
 
 interface ToolResult {
@@ -62,19 +64,375 @@ interface Message {
   content: MessageContent[];
 }
 
+// MCP Client class to handle real server communication
+class MCPClient {
+  private wsConnection: WebSocket | null = null;
+  private httpBaseUrl: string | null = null;
+  private messageId = 1;
+  private pendingRequests = new Map<number, (response: any) => void>();
+  private onMessage: (direction: 'sent' | 'received', message: any) => void;
+  private onLog: (level: LogLevel, message: string, details?: any) => void;
+  private isInitialized = false;
+
+  constructor(
+    onMessage: (direction: 'sent' | 'received', message: any) => void,
+    onLog: (level: LogLevel, message: string, details?: any) => void
+  ) {
+    this.onMessage = onMessage;
+    this.onLog = onLog;
+  }
+
+  async connectStdio(command: string, args: string[], workingDir: string): Promise<any> {
+    // For stdio connections, we need a bridge service since browsers can't spawn processes
+    // This would typically connect to a WebSocket bridge service
+    try {
+      this.onLog('info', 'Connecting via stdio bridge...', { command, args, workingDir });
+      
+      // Connect to a WebSocket bridge service (you'd need to implement this)
+      const bridgeUrl = 'ws://localhost:8080/mcp-bridge';
+      this.wsConnection = new WebSocket(bridgeUrl);
+      
+      return new Promise((resolve, reject) => {
+        if (!this.wsConnection) {
+          reject(new Error('Failed to create WebSocket connection'));
+          return;
+        }
+
+        this.wsConnection.onopen = async () => {
+          try {
+            // Send connection request to bridge
+            const connectMsg = {
+              type: 'connect',
+              command,
+              args,
+              workingDir
+            };
+            this.wsConnection!.send(JSON.stringify(connectMsg));
+            
+            // Initialize MCP session
+            const initResult = await this.initialize();
+            resolve(initResult);
+          } catch (error) {
+            reject(error);
+          }
+        };
+
+        this.wsConnection.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            this.handleMessage(data);
+          } catch (error) {
+            this.onLog('error', 'Failed to parse WebSocket message', error);
+          }
+        };
+
+        this.wsConnection.onerror = (error) => {
+          this.onLog('error', 'WebSocket connection error', error);
+          reject(error);
+        };
+
+        this.wsConnection.onclose = () => {
+          this.onLog('info', 'WebSocket connection closed');
+        };
+      });
+    } catch (error) {
+      this.onLog('error', 'Failed to connect via stdio', error);
+      throw error;
+    }
+  }
+
+  async connectHttp(baseUrl: string): Promise<any> {
+    try {
+      this.httpBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+      this.onLog('info', `Connecting to HTTP MCP server at ${this.httpBaseUrl}`);
+      
+      // Initialize MCP session
+      const initResult = await this.initialize();
+      return initResult;
+    } catch (error) {
+      this.onLog('error', 'Failed to connect via HTTP', error);
+      throw error;
+    }
+  }
+
+  private async initialize(): Promise<any> {
+    const initMessage = {
+      jsonrpc: '2.0',
+      id: this.messageId++,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        clientInfo: {
+          name: 'MCP Inspector',
+          version: '1.0.0'
+        },
+        capabilities: {
+          roots: { listChanged: true },
+          sampling: {}
+        }
+      }
+    };
+
+    try {
+      this.onMessage('sent', initMessage);
+      const response = await this.sendRequest(initMessage);
+      this.onMessage('received', response);
+      
+      if (response.error) {
+        throw new Error(`Initialize failed: ${response.error.message}`);
+      }
+
+      // Send initialized notification
+      const initializedNotification = {
+        jsonrpc: '2.0',
+        method: 'notifications/initialized',
+        params: {}
+      };
+      
+      await this.sendNotification(initializedNotification);
+      this.onMessage('sent', initializedNotification);
+      this.isInitialized = true;
+      
+      this.onLog('success', 'MCP session initialized successfully');
+      return response.result;
+    } catch (error) {
+      this.onLog('error', 'Failed to initialize MCP session', error);
+      throw error;
+    }
+  }
+
+  async listTools(): Promise<Tool[]> {
+    if (!this.isInitialized) {
+      throw new Error('Client not initialized');
+    }
+
+    const message = {
+      jsonrpc: '2.0',
+      id: this.messageId++,
+      method: 'tools/list',
+      params: {}
+    };
+
+    try {
+      this.onMessage('sent', message);
+      const response = await this.sendRequest(message);
+      this.onMessage('received', response);
+      
+      if (response.error) {
+        throw new Error(`List tools failed: ${response.error.message}`);
+      }
+
+      return response.result.tools || [];
+    } catch (error) {
+      this.onLog('error', 'Failed to list tools', error);
+      throw error;
+    }
+  }
+
+  async callTool(name: string, args: Record<string, any>): Promise<any> {
+    if (!this.isInitialized) {
+      throw new Error('Client not initialized');
+    }
+
+    console.log('MCPClient.callTool called with:', { name, args });
+
+    const message = {
+      jsonrpc: '2.0',
+      id: this.messageId++,
+      method: 'tools/call',
+      params: {
+        name,
+        arguments: args
+      }
+    };
+
+    try {
+      this.onMessage('sent', message);
+      const response = await this.sendRequest(message);
+      this.onMessage('received', response);
+      
+      if (response.error) {
+        throw new Error(`Tool call failed: ${response.error.message}`);
+      }
+
+      return response.result;
+    } catch (error) {
+      this.onLog('error', `Failed to call tool ${name}`, error);
+      throw error;
+    }
+  }
+
+  async listResources(): Promise<Resource[]> {
+    if (!this.isInitialized) {
+      throw new Error('Client not initialized');
+    }
+
+    const message = {
+      jsonrpc: '2.0',
+      id: this.messageId++,
+      method: 'resources/list',
+      params: {}
+    };
+
+    try {
+      this.onMessage('sent', message);
+      const response = await this.sendRequest(message);
+      this.onMessage('received', response);
+      
+      if (response.error) {
+        throw new Error(`List resources failed: ${response.error.message}`);
+      }
+
+      return response.result.resources || [];
+    } catch (error) {
+      this.onLog('error', 'Failed to list resources', error);
+      throw error;
+    }
+  }
+
+  async readResource(uri: string): Promise<any> {
+    if (!this.isInitialized) {
+      throw new Error('Client not initialized');
+    }
+
+    const message = {
+      jsonrpc: '2.0',
+      id: this.messageId++,
+      method: 'resources/read',
+      params: {
+        uris: [uri]
+      }
+    };
+
+    try {
+      this.onMessage('sent', message);
+      const response = await this.sendRequest(message);
+      this.onMessage('received', response);
+      
+      if (response.error) {
+        throw new Error(`Read resource failed: ${response.error.message}`);
+      }
+
+      return response.result.contents?.[0] || null;
+    } catch (error) {
+      this.onLog('error', `Failed to read resource ${uri}`, error);
+      throw error;
+    }
+  }
+
+  async listPrompts(): Promise<any[]> {
+    if (!this.isInitialized) {
+      throw new Error('Client not initialized');
+    }
+
+    const message = {
+      jsonrpc: '2.0',
+      id: this.messageId++,
+      method: 'prompts/list',
+      params: {}
+    };
+
+    try {
+      this.onMessage('sent', message);
+      const response = await this.sendRequest(message);
+      this.onMessage('received', response);
+      
+      if (response.error) {
+        throw new Error(`List prompts failed: ${response.error.message}`);
+      }
+
+      return response.result.prompts || [];
+    } catch (error) {
+      this.onLog('error', 'Failed to list prompts', error);
+      throw error;
+    }
+  }
+
+  private async sendRequest(message: any): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(message.id);
+        reject(new Error('Request timeout'));
+      }, 30000);
+
+      this.pendingRequests.set(message.id, (response) => {
+        clearTimeout(timeout);
+        resolve(response);
+      });
+
+      if (this.wsConnection && this.wsConnection.readyState === WebSocket.OPEN) {
+        this.wsConnection.send(JSON.stringify(message));
+      } else if (this.httpBaseUrl) {
+        this.sendHttpRequest(message).then(resolve).catch(reject);
+      } else {
+        reject(new Error('No active connection'));
+      }
+    });
+  }
+
+  private async sendNotification(message: any): Promise<void> {
+    if (this.wsConnection && this.wsConnection.readyState === WebSocket.OPEN) {
+      this.wsConnection.send(JSON.stringify(message));
+    } else if (this.httpBaseUrl) {
+      await this.sendHttpRequest(message);
+    } else {
+      throw new Error('No active connection');
+    }
+  }
+
+  private async sendHttpRequest(message: any): Promise<any> {
+    const response = await fetch(`${this.httpBaseUrl}/mcp`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(message)
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    return await response.json();
+  }
+
+  private handleMessage(data: any): void {
+    if (data.id && this.pendingRequests.has(data.id)) {
+      const resolver = this.pendingRequests.get(data.id);
+      this.pendingRequests.delete(data.id);
+      resolver!(data);
+    } else if (data.method) {
+      // Handle notifications
+      this.onLog('info', `Received notification: ${data.method}`, data.params);
+    }
+  }
+
+  disconnect(): void {
+    this.isInitialized = false;
+    if (this.wsConnection) {
+      this.wsConnection.close();
+      this.wsConnection = null;
+    }
+    this.httpBaseUrl = null;
+    this.pendingRequests.clear();
+    this.onLog('info', 'Disconnected from MCP server');
+  }
+}
+
 const MCPInspector = () => {
   const [activeTab, setActiveTab] = useState('connection');
   const [connectionConfig, setConnectionConfig] = useState({
     type: 'stdio',
-    command: '',
-    args: [] as string[],
+    command: 'python',
+    args: ['server.py'] as string[],
     workingDir: '',
-    env: {}
+    httpUrl: 'http://localhost:8000'
   });
   const [isConnected, setIsConnected] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('disconnected');
   const [serverInfo, setServerInfo] = useState<ServerInfo | null>(null);
   const [capabilities, setCapabilities] = useState<Record<string, any> | null>(null);
+  const [mcpClient, setMcpClient] = useState<MCPClient | null>(null);
   
   // Tools related state
   const [availableTools, setAvailableTools] = useState<Tool[]>([]);
@@ -96,13 +454,11 @@ const MCPInspector = () => {
   
   // Logs and debugging
   const [logs, setLogs] = useState<any[]>([]);
-  const [notifications, setNotifications] = useState<any[]>([]);
   const [rawMessages, setRawMessages] = useState<any[]>([]);
   const [expandedLogs, setExpandedLogs] = useState<Set<string>>(new Set());
   
   const logsEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Scroll to bottom of logs
   const scrollToBottom = () => {
     logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
@@ -110,83 +466,6 @@ const MCPInspector = () => {
   useEffect(() => {
     scrollToBottom();
   }, [logs, rawMessages]);
-
-  // Mock data for demonstration - in a real implementation, this would connect to actual MCP servers
-  useEffect(() => {
-    // Simulate some initial mock data
-    setAvailableTools([
-      {
-        name: 'get_weather',
-        description: 'Get current weather for a city',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            city: { type: 'string', description: 'City name' },
-            units: { type: 'string', enum: ['celsius', 'fahrenheit'], default: 'celsius' }
-          },
-          required: ['city']
-        }
-      },
-      {
-        name: 'read_file',
-        description: 'Read contents of a file',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            path: { type: 'string', description: 'File path' },
-            encoding: { type: 'string', default: 'utf-8' }
-          },
-          required: ['path']
-        }
-      },
-      {
-        name: 'search_web',
-        description: 'Search the web for information',
-        inputSchema: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Search query' },
-            max_results: { type: 'number', default: 5 }
-          },
-          required: ['query']
-        }
-      }
-    ]);
-
-    setAvailableResources([
-      {
-        uri: 'file:///home/user/documents/readme.md',
-        name: 'README.md',
-        description: 'Project documentation',
-        mimeType: 'text/markdown'
-      },
-      {
-        uri: 'db://localhost/users',
-        name: 'Users Database',
-        description: 'User management database',
-        mimeType: 'application/json'
-      }
-    ]);
-
-    setAvailablePrompts([
-      {
-        name: 'code_review',
-        description: 'Generate a code review',
-        arguments: [
-          { name: 'language', description: 'Programming language', type: 'string', required: true },
-          { name: 'code', description: 'Code to review', type: 'string', required: true }
-        ]
-      },
-      {
-        name: 'summarize_text',
-        description: 'Summarize a piece of text',
-        arguments: [
-          { name: 'text', description: 'Text to summarize', type: 'string', required: true },
-          { name: 'max_length', description: 'Maximum summary length', type: 'number', required: false }
-        ]
-      }
-    ]);
-  }, []);
 
   const addLog = (level: LogLevel, message: string, details: LogDetails = null) => {
     const newLog = {
@@ -203,7 +482,7 @@ const MCPInspector = () => {
     const newMessage = {
       id: Date.now() + Math.random(),
       timestamp: new Date().toISOString(),
-      direction, // 'sent' or 'received'
+      direction,
       message: JSON.stringify(message, null, 2)
     };
     setRawMessages(prev => [...prev, newMessage]);
@@ -213,178 +492,148 @@ const MCPInspector = () => {
     setConnectionStatus('connecting');
     addLog('info', 'Attempting to connect to MCP server', connectionConfig);
     
-    // Simulate connection process
-    setTimeout(() => {
+    try {
+      const client = new MCPClient(addRawMessage, addLog);
+      
+      let initResult;
+      if (connectionConfig.type === 'stdio') {
+        initResult = await client.connectStdio(
+          connectionConfig.command,
+          connectionConfig.args,
+          connectionConfig.workingDir
+        );
+      } else {
+        initResult = await client.connectHttp(connectionConfig.httpUrl);
+      }
+      
+      setMcpClient(client);
       setIsConnected(true);
       setConnectionStatus('connected');
-      setServerInfo({
-        name: 'Mock MCP Server',
-        version: '1.0.0',
-        protocolVersion: '2025-03-26'
-      });
-      setCapabilities({
-        tools: { listChanged: true },
-        resources: { subscribe: true },
-        prompts: { listChanged: true },
-        logging: true
-      });
+      setServerInfo(initResult.serverInfo || { name: 'MCP Server', version: 'Unknown' });
+      setCapabilities(initResult.capabilities || {});
+      
+      // Load available tools, resources, and prompts
+      await loadServerCapabilities(client, initResult.capabilities || {});
+      
       addLog('success', 'Successfully connected to MCP server');
-      addRawMessage('received', {
-        jsonrpc: '2.0',
-        id: 1,
-        result: {
-          protocolVersion: '2025-03-26',
-          serverInfo: { name: 'Mock MCP Server', version: '1.0.0' },
-          capabilities: { tools: {}, resources: {}, prompts: {} }
-        }
-      });
-    }, 2000);
+    } catch (error) {
+      setConnectionStatus('disconnected');
+      addLog('error', 'Failed to connect to MCP server', error as LogDetails);
+    }
+  };
+
+  const loadServerCapabilities = async (client: MCPClient, serverCapabilities: Record<string, any>) => {
+    try {
+      // Load tools
+      if (serverCapabilities?.tools !== undefined) {
+        addLog('info', 'Loading available tools...');
+        const tools = await client.listTools();
+        console.log('Loaded tools:', tools); // Debug log
+        setAvailableTools(tools);
+        addLog('success', `Loaded ${tools.length} tools: ${tools.map(t => t.name).join(', ')}`);
+      } else {
+        addLog('info', 'Server does not support tools');
+      }
+      
+      // Load resources
+      if (serverCapabilities?.resources !== undefined) {
+        addLog('info', 'Loading available resources...');
+        const resources = await client.listResources();
+        setAvailableResources(resources);
+        addLog('success', `Loaded ${resources.length} resources`);
+      } else {
+        addLog('info', 'Server does not support resources');
+      }
+      
+      // Load prompts
+      if (serverCapabilities?.prompts !== undefined) {
+        addLog('info', 'Loading available prompts...');
+        const prompts = await client.listPrompts();
+        setAvailablePrompts(prompts);
+        addLog('success', `Loaded ${prompts.length} prompts`);
+      } else {
+        addLog('info', 'Server does not support prompts');
+      }
+    } catch (error) {
+      addLog('error', 'Failed to load server capabilities', error as LogDetails);
+      console.error('Failed to load capabilities:', error);
+    }
   };
 
   const handleDisconnect = () => {
+    if (mcpClient) {
+      mcpClient.disconnect();
+      setMcpClient(null);
+    }
     setIsConnected(false);
     setConnectionStatus('disconnected');
     setServerInfo(null);
     setCapabilities(null);
+    setAvailableTools([]);
+    setAvailableResources([]);
+    setAvailablePrompts([]);
     addLog('info', 'Disconnected from MCP server');
   };
 
   const handleExecuteTool = async () => {
-    if (!selectedTool) return;
+    if (!selectedTool || !mcpClient) return;
     
     setIsExecutingTool(true);
+    const startTime = Date.now();
+    
+    // Debug log the tool inputs
+    console.log('Executing tool with inputs:', toolInputs);
     addLog('info', `Executing tool: ${selectedTool.name}`, toolInputs);
-    addRawMessage('sent', {
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method: 'tools/call',
-      params: {
-        name: selectedTool.name,
-        arguments: toolInputs
-      }
-    });
 
-    // Simulate tool execution
-    setTimeout(() => {
-      const mockResult: ToolResult = {
+    try {
+      const result = await mcpClient.callTool(selectedTool.name, toolInputs);
+      const duration = Date.now() - startTime;
+      
+      const toolResult: ToolResult = {
         id: Date.now(),
         toolName: selectedTool.name,
         inputs: { ...toolInputs },
         timestamp: new Date().toISOString(),
-        status: Math.random() > 0.1 ? 'success' : 'error',
-        duration: Math.random() * 1000 + 100,
-        result: null,
-        error: null
+        status: result.isError ? 'error' : 'success',
+        duration,
+        result: result.isError ? null : result,
+        error: result.isError ? (result.content?.[0]?.text || result.error?.message || 'Unknown error') : null
       };
 
-      if (mockResult.status === 'success') {
-        // Generate mock successful results based on tool type
-        if (selectedTool.name === 'get_weather') {
-          mockResult.result = {
-            temperature: Math.floor(Math.random() * 40) + 10,
-            condition: ['sunny', 'cloudy', 'rainy'][Math.floor(Math.random() * 3)],
-            humidity: Math.floor(Math.random() * 100),
-            city: toolInputs.city
-          };
-        } else if (selectedTool.name === 'read_file') {
-          mockResult.result = {
-            content: `File content for ${toolInputs.path}\n\nThis is mock file content...`,
-            size: 1024,
-            lastModified: new Date().toISOString()
-          };
-        } else {
-          mockResult.result = { success: true, data: 'Mock result data' };
-        }
-        addLog('success', `Tool executed successfully: ${selectedTool.name}`);
-      } else {
-        mockResult.error = 'Simulated error: Connection timeout';
-        addLog('error', `Tool execution failed: ${selectedTool.name}`, { error: mockResult.error });
-      }
-
-      addRawMessage('received', {
-        jsonrpc: '2.0',
+      setToolResults(prev => [toolResult, ...prev]);
+      addLog(result.isError ? 'error' : 'success', 
+            `Tool ${result.isError ? 'failed' : 'executed successfully'}: ${selectedTool.name}`);
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      const toolResult: ToolResult = {
         id: Date.now(),
-        result: {
-          content: [{ type: 'text', text: JSON.stringify(mockResult.result || mockResult.error) }],
-          isError: mockResult.status === 'error'
-        }
-      });
+        toolName: selectedTool.name,
+        inputs: { ...toolInputs },
+        timestamp: new Date().toISOString(),
+        status: 'error',
+        duration,
+        result: null,
+        error: error instanceof Error ? error.message : String(error)
+      };
 
-      setToolResults(prev => [mockResult, ...prev]);
+      setToolResults(prev => [toolResult, ...prev]);
+      addLog('error', `Tool execution failed: ${selectedTool.name}`, error as LogDetails);
+    } finally {
       setIsExecutingTool(false);
-    }, Math.random() * 2000 + 1000);
+    }
   };
 
   const handleResourceRead = async (resource: Resource) => {
-    addLog('info', `Reading resource: ${resource.name}`);
-    addRawMessage('sent', {
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method: 'resources/read',
-      params: { uris: [resource.uri] }
-    });
-
-    // Simulate resource reading
-    setTimeout(() => {
-      const mockContent = {
-        uri: resource.uri,
-        mimeType: resource.mimeType,
-        text: resource.mimeType.includes('json') ? 
-          JSON.stringify({ users: [{ id: 1, name: 'John' }, { id: 2, name: 'Jane' }] }, null, 2) :
-          `# ${resource.name}\n\nThis is mock content for ${resource.name}.\n\nLorem ipsum dolor sit amet...`
-      };
-      
-      setResourceContent(mockContent);
-      addLog('success', `Resource read successfully: ${resource.name}`);
-      addRawMessage('received', {
-        jsonrpc: '2.0',
-        id: Date.now(),
-        result: {
-          contents: [mockContent]
-        }
-      });
-    }, 500);
-  };
-
-  const handlePromptGet = async () => {
-    if (!selectedPrompt) return;
+    if (!mcpClient) return;
     
-    addLog('info', `Getting prompt: ${selectedPrompt.name}`, promptInputs);
-    addRawMessage('sent', {
-      jsonrpc: '2.0',
-      id: Date.now(),
-      method: 'prompts/get',
-      params: {
-        name: selectedPrompt.name,
-        arguments: promptInputs
-      }
-    });
-
-    // Simulate prompt generation
-    setTimeout(() => {
-      const mockPromptResult = {
-        description: `Generated prompt for ${selectedPrompt.name}`,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `Please ${selectedPrompt.description.toLowerCase()} the following: ${JSON.stringify(promptInputs)}`
-              }
-            ]
-          }
-        ]
-      };
-
-      setPromptResult(mockPromptResult);
-      addLog('success', `Prompt generated successfully: ${selectedPrompt.name}`);
-      addRawMessage('received', {
-        jsonrpc: '2.0',
-        id: Date.now(),
-        result: mockPromptResult
-      });
-    }, 800);
+    addLog('info', `Reading resource: ${resource.name}`);
+    try {
+      const content = await mcpClient.readResource(resource.uri);
+      setResourceContent(content);
+      addLog('success', `Resource read successfully: ${resource.name}`);
+    } catch (error) {
+      addLog('error', `Failed to read resource: ${resource.name}`, error as LogDetails);
+    }
   };
 
   const copyToClipboard = (text: string) => {
@@ -561,7 +810,9 @@ const MCPInspector = () => {
                 <div className="text-xs text-gray-600 space-y-1">
                   <div><strong>Name:</strong> {serverInfo.name}</div>
                   <div><strong>Version:</strong> {serverInfo.version}</div>
-                  <div><strong>Protocol:</strong> {serverInfo.protocolVersion}</div>
+                  {serverInfo.protocolVersion && (
+                    <div><strong>Protocol:</strong> {serverInfo.protocolVersion}</div>
+                  )}
                 </div>
               </div>
             )}
@@ -585,51 +836,76 @@ const MCPInspector = () => {
                     value={connectionConfig.type}
                     onChange={(e) => setConnectionConfig(prev => ({ ...prev, type: e.target.value }))}
                   >
-                    <option value="stdio">Standard I/O</option>
+                    <option value="stdio">Standard I/O (requires bridge)</option>
                     <option value="http">HTTP</option>
                   </select>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Command
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    value={connectionConfig.command}
-                    onChange={(e) => setConnectionConfig(prev => ({ ...prev, command: e.target.value }))}
-                    placeholder="python server.py"
-                  />
-                </div>
+                {connectionConfig.type === 'stdio' ? (
+                  <>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Command
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        value={connectionConfig.command}
+                        onChange={(e) => setConnectionConfig(prev => ({ ...prev, command: e.target.value }))}
+                        placeholder="python"
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Arguments (one per line)
-                  </label>
-                  <textarea
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    rows={4}
-                    value={connectionConfig.args.join('\n')}
-                    onChange={(e) => setConnectionConfig(prev => ({ 
-                      ...prev, 
-                      args: e.target.value.split('\n').filter(arg => arg.trim()) 
-                    }))}
-                    placeholder="--verbose&#10;--config config.json"
-                  />
-                </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Arguments (one per line)
+                      </label>
+                      <textarea
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        rows={4}
+                        value={connectionConfig.args.join('\n')}
+                        onChange={(e) => setConnectionConfig(prev => ({ 
+                          ...prev, 
+                          args: e.target.value.split('\n').filter(arg => arg.trim()) 
+                        }))}
+                        placeholder="server.py"
+                      />
+                    </div>
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Working Directory
-                  </label>
-                  <input
-                    type="text"
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    value={connectionConfig.workingDir}
-                    onChange={(e) => setConnectionConfig(prev => ({ ...prev, workingDir: e.target.value }))}
-                    placeholder="/path/to/mcp/server"
-                  />
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Working Directory
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        value={connectionConfig.workingDir}
+                        onChange={(e) => setConnectionConfig(prev => ({ ...prev, workingDir: e.target.value }))}
+                        placeholder="/path/to/mcp/server"
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      HTTP URL
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={connectionConfig.httpUrl}
+                      onChange={(e) => setConnectionConfig(prev => ({ ...prev, httpUrl: e.target.value }))}
+                      placeholder="http://localhost:8000"
+                    />
+                  </div>
+                )}
+
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <h4 className="font-medium text-yellow-800 mb-2">Note for stdio connections:</h4>
+                  <p className="text-sm text-yellow-700">
+                    Browser-based MCP Inspector requires a WebSocket bridge service for stdio connections. 
+                    The bridge service should run at ws://localhost:8080/mcp-bridge and handle process spawning.
+                  </p>
                 </div>
 
                 <button
@@ -653,11 +929,16 @@ const MCPInspector = () => {
             </div>
           )}
 
-          {/* Tools Tab */}
-          {/* Tools Tab */}
+          {/* Tools Tab - Tool execution and results display */}
           {activeTab === 'tools' && (
             <div className="p-6">
               <h2 className="text-xl font-semibold text-gray-900 mb-6">Tools</h2>
+              
+              {/* Debug info */}
+              <div className="mb-4 text-sm text-gray-600">
+                Debug: {availableTools.length} tools loaded
+                {availableTools.length > 0 && ` (${availableTools.map(t => t.name).join(', ')})`}
+              </div>
               
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {/* Tool Selection */}
@@ -852,7 +1133,7 @@ const MCPInspector = () => {
                           {result.status === 'success' && result.result && (
                             <div>
                               <h5 className="font-medium text-gray-900 mb-2">Result</h5>
-                              <pre className="text-sm text-gray-800 bg-green-50 p-3 rounded border overflow-x-auto">
+                              <pre className="text-sm text-gray-800 bg-green-50 p-3 rounded border overflow-x-auto whitespace-pre-wrap break-words max-w-full">
                                 {JSON.stringify(result.result, null, 2)}
                               </pre>
                             </div>
@@ -913,133 +1194,133 @@ const MCPInspector = () => {
             </div>
           )}
 
-          {/* Prompts Tab */}
-          {activeTab === 'prompts' && (
+          {/* Resources Tab */}
+          {activeTab === 'resources' && (
             <div className="p-6">
-              <h2 className="text-xl font-semibold text-gray-900 mb-6">Prompts</h2>
+              <h2 className="text-xl font-semibold text-gray-900 mb-6">Resources</h2>
               
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Prompt Selection */}
+                {/* Resources List */}
                 <div className="space-y-4">
-                  <h3 className="text-lg font-medium text-gray-900">Available Prompts</h3>
+                  <h3 className="text-lg font-medium text-gray-900">Available Resources</h3>
                   <div className="space-y-2">
-                    {availablePrompts.map((prompt) => (
+                    {availableResources.map((resource) => (
                       <div
-                        key={prompt.name}
+                        key={resource.uri}
                         className={`p-4 border rounded-lg cursor-pointer transition-colors ${
-                          selectedPrompt?.name === prompt.name ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'
+                          selectedResource?.uri === resource.uri ? 'border-indigo-500 bg-indigo-50' : 'border-gray-200 hover:border-gray-300'
                         }`}
                         onClick={() => {
-                          setSelectedPrompt(prompt);
-                          setPromptInputs({});
+                          setSelectedResource(resource);
+                          setResourceContent(null);
+                          handleResourceRead(resource);
                         }}
                       >
-                        <h4 className="font-medium text-gray-900">{prompt.name}</h4>
-                        <p className="text-sm text-gray-600 mt-1">{prompt.description}</p>
-                        <div className="text-xs text-gray-500 mt-2">
-                          Arguments: {prompt.arguments.map((arg: PromptArgument) => arg.name).join(', ')}
-                        </div>
+                        <h4 className="font-medium text-gray-900">{resource.name}</h4>
+                        <p className="text-sm text-gray-600 mt-1">{resource.description}</p>
+                        <p className="text-xs text-gray-500 mt-1">{resource.uri}</p>
+                        <span className="inline-block mt-2 px-2 py-1 bg-gray-100 text-xs rounded">
+                          {resource.mimeType}
+                        </span>
                       </div>
                     ))}
                   </div>
+                  
+                  {/* No Resources Message */}
+                  {availableResources.length === 0 && (
+                    <div className="text-center py-8 text-gray-500">
+                      <span className="text-4xl mb-2 block">📄</span>
+                      <p>No resources available</p>
+                      <p className="text-sm">Connect to an MCP server that provides resources</p>
+                    </div>
+                  )}
                 </div>
 
-                {/* Prompt Configuration */}
-                {selectedPrompt && (
-                  <div className="space-y-4">
-                    <h3 className="text-lg font-medium text-gray-900">Configure Prompt: {selectedPrompt.name}</h3>
-                    
-                    {/* Input Parameters */}
-                    <div className="space-y-4">
-                      {selectedPrompt.arguments.map((arg: PromptArgument) => (
-                        <div key={arg.name}>
-                          <label className="block text-sm font-medium text-gray-700 mb-2">
-                            {arg.name}
-                            {arg.required && (
-                              <span className="text-red-500 ml-1">*</span>
-                            )}
-                          </label>
-                          {arg.type === 'number' ? (
-                            <input
-                              type="number"
-                              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              value={promptInputs[arg.name] || ''}
-                              placeholder={arg.description}
-                              onChange={(e) => setPromptInputs(prev => ({ 
-                                ...prev, 
-                                [arg.name]: parseFloat(e.target.value) || 0 
-                              }))}
-                            />
-                          ) : (
-                            <textarea
-                              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                              rows={3}
-                              value={promptInputs[arg.name] || ''}
-                              placeholder={arg.description}
-                              onChange={(e) => setPromptInputs(prev => ({ 
-                                ...prev, 
-                                [arg.name]: e.target.value 
-                              }))}
-                            />
-                          )}
-                          <p className="text-xs text-gray-500 mt-1">{arg.description}</p>
-                        </div>
-                      ))}
+                {/* Resource Content */}
+                {selectedResource && !resourceContent && (
+                  <div className="flex items-center justify-center h-64">
+                    <div className="text-center">
+                      <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-indigo-500 mx-auto mb-4"></div>
+                      <p className="text-gray-600">Loading resource content...</p>
                     </div>
-
-                    <button
-                      onClick={handlePromptGet}
-                      className="bg-purple-600 hover:bg-purple-700 text-white px-6 py-2 rounded-lg transition-colors flex items-center space-x-2"
-                    >
-                      <span>💭</span>
-                      <span>Generate Prompt</span>
-                    </button>
                   </div>
                 )}
-              </div>
-
-              {/* Prompt Results */}
-              {promptResult && (
-                <div className="mt-8">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-lg font-medium text-gray-900">Generated Prompt</h3>
-                    <button
-                      onClick={() => copyToClipboard(JSON.stringify(promptResult, null, 2))}
-                      className="text-gray-500 hover:text-gray-700 flex items-center space-x-1"
-                    >
-                      <Copy className="h-4 w-4" />
-                      <span className="text-sm">Copy</span>
-                    </button>
-                  </div>
-                  <div className="border rounded-lg p-4 bg-white">
-                    <div className="mb-4">
-                      <h4 className="font-medium text-gray-900 mb-2">Description</h4>
-                      <p className="text-gray-700">{promptResult.description}</p>
+                
+                {resourceContent && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-lg font-medium text-gray-900">Resource Content</h3>
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => copyToClipboard(resourceContent.text || resourceContent.blob)}
+                          className="text-gray-500 hover:text-gray-700 flex items-center space-x-1"
+                        >
+                          <Copy className="h-4 w-4" />
+                          <span className="text-sm">Copy</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setSelectedResource(null);
+                            setResourceContent(null);
+                          }}
+                          className="text-gray-500 hover:text-gray-700"
+                        >
+                          <XCircle className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="font-medium text-gray-900 mb-2">Messages</h4>
-                      <div className="space-y-3">
-                        {promptResult.messages.map((message: Message, index: number) => (
-                          <div key={index} className="border rounded p-3 bg-gray-50">
-                            <div className="font-medium text-sm text-gray-600 mb-2">
-                              Role: {message.role}
-                            </div>
-                            {message.content.map((content: MessageContent, contentIndex: number) => (
-                              <div key={contentIndex}>
-                                {content.type === 'text' && (
-                                  <pre className="text-sm text-gray-800 whitespace-pre-wrap">
-                                    {content.text}
-                                  </pre>
-                                )}
-                              </div>
-                            ))}
+                    
+                    <div className="border rounded-lg">
+                      <div className="bg-gray-50 px-4 py-2 border-b text-sm text-gray-600 flex items-center justify-between">
+                        <div>
+                          <span className="font-medium">{selectedResource?.name}</span>
+                          <span className="ml-2 text-gray-400">•</span>
+                          <span className="ml-2">{resourceContent.mimeType}</span>
+                        </div>
+                        <span className="text-xs">
+                          {resourceContent.text ? `${resourceContent.text.length} chars` : 'Binary content'}
+                        </span>
+                      </div>
+                      
+                      {/* Content Display */}
+                      <div className="p-4">
+                        {resourceContent.text ? (
+                          <pre className="text-sm text-gray-800 overflow-x-auto max-h-96 bg-gray-50 p-3 rounded border whitespace-pre-wrap">
+                            {resourceContent.text}
+                          </pre>
+                        ) : resourceContent.blob ? (
+                          /* Binary Content */
+                          <div className="text-center py-8 text-gray-500">
+                            <span className="text-4xl mb-2 block">📦</span>
+                            <p>Binary content cannot be displayed</p>
+                            <p className="text-sm">Size: {resourceContent.blob.length} bytes (base64)</p>
+                            <button
+                              onClick={() => copyToClipboard(resourceContent.blob)}
+                              className="mt-2 bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded text-sm"
+                            >
+                              Copy Base64
+                            </button>
                           </div>
-                        ))}
+                        ) : (
+                          /* No Content */
+                          <div className="text-center py-8 text-gray-500">
+                            <span className="text-4xl mb-2 block">❓</span>
+                            <p>No content available</p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
+                
+                {!selectedResource && (
+                  <div className="text-center py-12 text-gray-500">
+                    <span className="text-4xl mb-4 block">📄</span>
+                    <h3 className="text-lg font-medium text-gray-900 mb-2">Select a Resource</h3>
+                    <p>Choose a resource from the list to view its content</p>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
