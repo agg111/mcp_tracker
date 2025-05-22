@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, Square, Trash2, Settings, Bug, Clock, CheckCircle, XCircle, ChevronDown, ChevronRight, Copy } from 'lucide-react';
+import { Play, Square, Trash2, Settings, Bug, Clock, CheckCircle, XCircle, ChevronDown, ChevronRight, Copy, ExternalLink } from 'lucide-react';
 
 interface Tool {
   name: string;
@@ -423,8 +423,11 @@ const MCPInspector = () => {
   const [activeTab, setActiveTab] = useState('connection');
   const [connectionConfig, setConnectionConfig] = useState({
     type: 'stdio',
-    command: 'python',
-    args: ['server.py'] as string[],
+    command: '',
+    subcommand: '',
+    filename: '',
+    extraArgs: '',
+    args: ['', ''], // This will be auto-generated
     workingDir: '',
     httpUrl: 'http://localhost:8000'
   });
@@ -497,9 +500,12 @@ const MCPInspector = () => {
       
       let initResult;
       if (connectionConfig.type === 'stdio') {
+        // Use the args that are automatically built from the separate inputs
+        const cleanArgs = connectionConfig.args.filter(arg => arg && arg.trim().length > 0);
+        
         initResult = await client.connectStdio(
-          connectionConfig.command,
-          connectionConfig.args,
+          connectionConfig.command.trim(),
+          cleanArgs,
           connectionConfig.workingDir
         );
       } else {
@@ -660,12 +666,31 @@ const MCPInspector = () => {
   const renderToolInput = (property: string, schema: { type: string; description?: string; enum?: string[] }) => {
     const value = toolInputs[property] || '';
     
+    // Helper function to update input with trimming
+    const updateValue = (newValue: any) => {
+      // Trim strings but preserve other types as-is
+      const trimmedValue = typeof newValue === 'string' ? newValue.trim() : newValue;
+      setToolInputs(prev => ({ ...prev, [property]: trimmedValue }));
+    };
+  
+    // Helper function for handling input changes (trim on blur, not on every keystroke)
+    const handleStringChange = (newValue: string) => {
+      setToolInputs(prev => ({ ...prev, [property]: newValue }));
+    };
+  
+    const handleStringBlur = (e: React.FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const trimmedValue = e.target.value.trim();
+      if (trimmedValue !== e.target.value) {
+        setToolInputs(prev => ({ ...prev, [property]: trimmedValue }));
+      }
+    };
+  
     if (schema.enum) {
       return (
         <select
           className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
           value={value}
-          onChange={(e) => setToolInputs(prev => ({ ...prev, [property]: e.target.value }))}
+          onChange={(e) => updateValue(e.target.value)}
         >
           <option value="">Select {property}</option>
           {schema.enum.map(option => (
@@ -674,7 +699,7 @@ const MCPInspector = () => {
         </select>
       );
     }
-
+  
     if (schema.type === 'number') {
       return (
         <input
@@ -682,19 +707,63 @@ const MCPInspector = () => {
           className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
           value={value}
           placeholder={schema.description}
-          onChange={(e) => setToolInputs(prev => ({ ...prev, [property]: parseFloat(e.target.value) || 0 }))}
+          onChange={(e) => updateValue(parseFloat(e.target.value) || 0)}
         />
       );
     }
-
+  
+    if (schema.type === 'boolean') {
+      return (
+        <select
+          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+          value={value.toString()}
+          onChange={(e) => updateValue(e.target.value === 'true')}
+        >
+          <option value="">Select {property}</option>
+          <option value="true">True</option>
+          <option value="false">False</option>
+        </select>
+      );
+    }
+  
+    // For string inputs, use textarea to allow multi-line input and Enter key
     return (
-      <input
-        type="text"
-        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-        value={value}
-        placeholder={schema.description}
-        onChange={(e) => setToolInputs(prev => ({ ...prev, [property]: e.target.value }))}
-      />
+      <div className="space-y-2">
+        <textarea
+          className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 min-h-[2.5rem] resize-y"
+          value={value}
+          placeholder={schema.description || `Enter ${property}...`}
+          onChange={(e) => handleStringChange(e.target.value)}
+          onBlur={handleStringBlur}
+          rows={1}
+          style={{
+            resize: 'vertical',
+            minHeight: '2.5rem',
+            maxHeight: '200px'
+          }}
+          onInput={(e) => {
+            // Auto-resize textarea based on content
+            const target = e.target as HTMLTextAreaElement;
+            target.style.height = 'auto';
+            target.style.height = Math.min(target.scrollHeight, 200) + 'px';
+          }}
+        />
+        
+        {/* Show trimming indicator */}
+        {typeof value === 'string' && value !== value.trim() && (
+          <div className="flex items-center space-x-2 text-xs text-yellow-600">
+            <span>⚠️</span>
+            <span>Trailing spaces will be trimmed when you finish editing</span>
+          </div>
+        )}
+        
+        {/* Show character count for longer inputs */}
+        {typeof value === 'string' && value.length > 50 && (
+          <div className="text-xs text-gray-500 text-right">
+            {value.length} characters
+          </div>
+        )}
+      </div>
     );
   };
 
@@ -841,6 +910,7 @@ const MCPInspector = () => {
                   </select>
                 </div>
 
+                {/* Stdio configuration section */}
                 {connectionConfig.type === 'stdio' ? (
                   <>
                     <div>
@@ -851,25 +921,52 @@ const MCPInspector = () => {
                         type="text"
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         value={connectionConfig.command}
-                        onChange={(e) => setConnectionConfig(prev => ({ ...prev, command: e.target.value }))}
-                        placeholder="python"
+                        onChange={(e) => setConnectionConfig(prev => ({ ...prev, command: e.target.value.trim() }))}
+                        placeholder="uv"
                       />
+                      <div className="mt-1 text-xs text-gray-500">
+                        The main command to run (e.g., "uv", "python", "node")
+                      </div>
                     </div>
 
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Arguments (one per line)
+                        Subcommand
                       </label>
-                      <textarea
+                      <input
+                        type="text"
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        rows={4}
-                        value={connectionConfig.args.join('\n')}
+                        value={connectionConfig.subcommand || ''}
                         onChange={(e) => setConnectionConfig(prev => ({ 
                           ...prev, 
-                          args: e.target.value.split('\n').filter(arg => arg.trim()) 
+                          subcommand: e.target.value.trim(),
+                          args: e.target.value.trim() ? [e.target.value.trim(), prev.filename || ''].filter(Boolean) : [prev.filename || ''].filter(Boolean)
                         }))}
-                        placeholder="server.py"
+                        placeholder="run"
                       />
+                      <div className="mt-1 text-xs text-gray-500">
+                        The subcommand (e.g., "run" for uv, leave empty for direct python execution)
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        MCP Server Name
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        value={connectionConfig.filename || ''}
+                        onChange={(e) => setConnectionConfig(prev => ({ 
+                          ...prev, 
+                          filename: e.target.value.trim(),
+                          args: [prev.subcommand || '', e.target.value.trim()].filter(Boolean)
+                        }))}
+                        placeholder="weather.py"
+                      />
+                      <div className="mt-1 text-xs text-gray-500">
+                        The mcp server file to execute
+                      </div>
                     </div>
 
                     <div>
@@ -881,8 +978,58 @@ const MCPInspector = () => {
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         value={connectionConfig.workingDir}
                         onChange={(e) => setConnectionConfig(prev => ({ ...prev, workingDir: e.target.value }))}
-                        placeholder="/path/to/mcp/server"
+                        placeholder="/path/to/weather"
                       />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">
+                        Additional Arguments (optional)
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        value={connectionConfig.extraArgs || ''}
+                        onChange={(e) => {
+                          const extraArgs = e.target.value.trim() ? e.target.value.trim().split(/\s+/) : [];
+                          setConnectionConfig(prev => ({ 
+                            ...prev, 
+                            extraArgs: e.target.value,
+                            args: [prev.subcommand || '', prev.filename || '', ...extraArgs].filter(Boolean)
+                          }));
+                        }}
+                        placeholder="--debug --verbose"
+                      />
+                      <div className="mt-1 text-xs text-gray-500">
+                        Extra command line arguments, separated by spaces
+                      </div>
+                    </div>
+
+                    {/* Command Preview */}
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                      <h4 className="font-medium text-blue-900 mb-2">Command Preview</h4>
+                      <div className="space-y-2">
+                        <div>
+                          <span className="text-sm text-blue-700 font-medium">Full Command:</span>
+                          <div className="font-mono text-sm text-blue-800 bg-white p-2 rounded border mt-1">
+                            {connectionConfig.command} {connectionConfig.args.filter(Boolean).join(' ')}
+                          </div>
+                        </div>
+                        <div>
+                          <span className="text-sm text-blue-700 font-medium">Arguments Array:</span>
+                          <div className="font-mono text-sm text-blue-800 bg-white p-2 rounded border mt-1">
+                            [{connectionConfig.args.filter(Boolean).map(arg => `"${arg}"`).join(', ')}]
+                          </div>
+                        </div>
+                        {connectionConfig.workingDir && (
+                          <div>
+                            <span className="text-sm text-blue-700 font-medium">Working Directory:</span>
+                            <div className="font-mono text-sm text-blue-800 bg-white p-2 rounded border mt-1">
+                              {connectionConfig.workingDir}
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </>
                 ) : (
@@ -1133,9 +1280,11 @@ const MCPInspector = () => {
                           {result.status === 'success' && result.result && (
                             <div>
                               <h5 className="font-medium text-gray-900 mb-2">Result</h5>
-                              <pre className="text-sm text-gray-800 bg-green-50 p-3 rounded border overflow-x-auto whitespace-pre-wrap break-words max-w-full">
-                                {JSON.stringify(result.result, null, 2)}
-                              </pre>
+                              <div className="text-sm text-gray-800 bg-green-50 p-3 rounded border overflow-x-auto max-w-full">
+                                <pre className="whitespace-pre-wrap break-words">
+                                  {JSON.stringify(result.result, null, 2).replace(/\\n/g, '\n')}
+                                </pre>
+                              </div>
                             </div>
                           )}
                           
