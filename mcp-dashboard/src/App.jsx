@@ -1,9 +1,9 @@
 import React from 'react';
-import MCPCallStackDashboard from './MCPCallStackDashboard';
+import MCPInspector from './mcp-inspector';
 import './App.css';
 
 function App() {
-  return <MCPCallStackDashboard />;
+  return <MCPInspector />;
 }
 
 export default App;
