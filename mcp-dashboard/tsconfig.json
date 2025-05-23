@@ -19,7 +19,7 @@
         "@/*": ["src/*"]
       }
     },
-    "include": ["src"],
+    "include": ["src", "../mcp-bridge/mcp-bridge.ts"],
     "exclude": ["node_modules", "dist"]
   }
   
