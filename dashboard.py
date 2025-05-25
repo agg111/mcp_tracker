@@ -15,7 +15,8 @@ st.title("📊 MCP Metrics Dashboard")
 
 # Fetch metrics
 with st.spinner("Fetching metrics..."):
-    response = supabase.table("mcp_metrics").select("*").order("created_at", desc=True).limit(100).execute()
+    response = supabase.table("mcp_metrics").select(
+        "*").order("created_at", desc=True).limit(100).execute()
     data = response.data if response else []
 
 if not data:
@@ -29,7 +30,8 @@ else:
 
     st.sidebar.header("Filters")
     selected_server = st.sidebar.selectbox("Server Name", ["All"] + servers)
-    selected_metric = st.sidebar.selectbox("Metric Name", ["All"] + metric_names)
+    selected_metric = st.sidebar.selectbox(
+        "Metric Name", ["All"] + metric_names)
 
     filtered = [
         m for m in data
@@ -44,16 +46,18 @@ else:
     if filtered:
         import pandas as pd
         df = pd.DataFrame(filtered)
-        
+
         # Use created_at or another timestamp field if available
         if "created_at" in df.columns:
             df["timestamp"] = pd.to_datetime(df["created_at"])
         else:
             # fallback if you have another timestamp field, replace accordingly
-            df["timestamp"] = pd.to_datetime(df.get("timestamp", pd.Timestamp.now()))
+            df["timestamp"] = pd.to_datetime(
+                df.get("timestamp", pd.Timestamp.now()))
 
         df = df.sort_values("timestamp")
-        
+
         # Pivot table: index = timestamp, columns = metric_name, values = value
-        chart = df.pivot(index="timestamp", columns="metric_name", values="value")
+        chart = df.pivot(index="timestamp",
+                         columns="metric_name", values="value")
         st.line_chart(chart)
