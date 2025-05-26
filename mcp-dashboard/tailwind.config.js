@@ -160,15 +160,11 @@ module.exports = {
     },
   },
   plugins: [
-    // Add any plugins you need
     function({ addUtilities }) {
       addUtilities({
         '.scrollbar-hide': {
-          /* IE and Edge */
           '-ms-overflow-style': 'none',
-          /* Firefox */
           'scrollbar-width': 'none',
-          /* Safari and Chrome */
           '&::-webkit-scrollbar': {
             display: 'none'
           }
@@ -200,6 +196,34 @@ module.exports = {
           '-webkit-background-clip': 'text',
           '-webkit-text-fill-color': 'transparent',
           'background-clip': 'text',
+        },
+        '.overflow-wrap-anywhere': {
+          'overflow-wrap': 'anywhere',
+        },
+        '.select-text': {
+          '-webkit-user-select': 'text',
+          '-moz-user-select': 'text',
+          '-ms-user-select': 'text',
+          'user-select': 'text',
+        },
+        '.select-all': {
+          '-webkit-user-select': 'all',
+          '-moz-user-select': 'all',
+          '-ms-user-select': 'all',
+          'user-select': 'all',
+        },
+        '.select-url': {
+          '-webkit-user-select': 'all',
+          '-moz-user-select': 'all', 
+          '-ms-user-select': 'all',
+          'user-select': 'all',
+          'word-break': 'break-all',
+          'cursor': 'text',
+          'transition': 'background-color 0.2s ease',
+          '&:hover': {
+            'background-color': 'rgba(59, 130, 246, 0.1)',
+            'border-radius': '2px',
+          }
         },
       });
     },

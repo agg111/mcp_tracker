@@ -23,6 +23,12 @@ export interface Resource {
     size?: number;
     lastModified?: number;
 }
+
+export interface Prompt {
+	name: string;
+	description?: string;
+	arguments?: PromptArgument[];
+}
   
 export interface ServerInfo {
     name: string;
@@ -39,6 +45,30 @@ export interface ToolResult {
     duration: number;
     result: any;
     error: string | null;
+}
+
+export interface PromptResult {
+	id: number;
+	promptName: string;
+	inputs: Record<string, string | number>;
+	timestamp: string;
+	status: "success" | "error";
+	duration: number;
+	result: any;
+	error?: string;
+}
+
+export interface PromptMessage {
+	role: "user" | "assistant";
+	content: {
+		type: "text";
+		text: string;
+	};
+}
+
+export interface PromptResponse {
+	description?: string;
+	messages: PromptMessage[];
 }
   
 export type LogLevel = 'info' | 'success' | 'error' | 'warning';

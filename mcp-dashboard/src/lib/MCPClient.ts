@@ -250,52 +250,120 @@ export class MCPClient {
     }
   }
 
-  async listPrompts(): Promise<any[]> {
+  async getPrompt(name: string, args?: Record<string, any>): Promise<any> {
     if (!this.isInitialized) {
-      throw new Error('Client not initialized');
+      throw new Error("MCP client not initialized");
     }
 
-    const message = {
-      jsonrpc: '2.0',
+    const request = {
+      jsonrpc: "2.0",
       id: this.messageId++,
-      method: 'prompts/list',
-      params: {}
+      method: "prompts/get",
+      params: {
+        name,
+        arguments: args || {},
+      },
     };
 
+    this.onMessage('sent', request);
+    this.onLog('info', `Getting prompt: ${name}`, { arguments });
+
     try {
-      this.onMessage('sent', message);
-      const response = await this.sendRequest(message);
+      const response = await this.sendRequest(request);
       this.onMessage('received', response);
-      
+
       if (response.error) {
-        throw new Error(`List prompts failed: ${response.error.message}`);
+        this.onLog('error', `Prompt execution failed: ${response.error.message}`, response.error);
+        throw new Error(`Prompt execution failed: ${response.error.message}`);
       }
 
-      return response.result.prompts || [];
+      this.onLog('success', `Prompt executed successfully: ${name}`);
+      return response.result;
+    } catch (error) {
+      this.onLog('error', `Failed to execute prompt: ${name}`, error);
+      throw error;
+    }
+  }
+
+  async listPrompts(): Promise<any[]> {
+    if (!this.isInitialized) {
+      throw new Error("MCP client not initialized");
+    }
+
+    const request = {
+      jsonrpc: "2.0",
+      id: this.messageId++,
+      method: "prompts/list",
+    };
+
+    this.onMessage('sent', request);
+    this.onLog('info', 'Listing available prompts');
+
+    try {
+      const response = await this.sendRequest(request);
+      this.onMessage('received', response);
+
+      if (response.error) {
+        this.onLog('error', `Failed to list prompts: ${response.error.message}`, response.error);
+        throw new Error(`Failed to list prompts: ${response.error.message}`);
+      }
+
+      const prompts = response.result?.prompts || [];
+      this.onLog('success', `Found ${prompts.length} prompts`);
+      return prompts;
     } catch (error) {
       this.onLog('error', 'Failed to list prompts', error);
       throw error;
     }
   }
 
-  private async sendRequest(message: any): Promise<any> {
+  private async sendRequest(request: any): Promise<any> {
     return new Promise((resolve, reject) => {
+      // Store the resolver for this request ID
+      this.pendingRequests.set(request.id, resolve);
+
+      // Set a timeout to reject if no response
       const timeout = setTimeout(() => {
-        this.pendingRequests.delete(message.id);
-        reject(new Error('Request timeout'));
-      }, 30000);
+        this.pendingRequests.delete(request.id);
+        reject(new Error(`Request timeout for ${request.method}`));
+      }, 30000); // 30 second timeout
 
-      this.pendingRequests.set(message.id, (response) => {
+      try {
+        if (this.wsConnection && this.wsConnection.readyState === WebSocket.OPEN) {
+          // WebSocket connection
+          this.wsConnection.send(JSON.stringify(request));
+        } else if (this.httpBaseUrl) {
+          // HTTP connection
+          fetch(`${this.httpBaseUrl}/mcp`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(request),
+          })
+          .then(response => response.json())
+          .then(data => {
+            clearTimeout(timeout);
+            const resolver = this.pendingRequests.get(request.id);
+            if (resolver) {
+              this.pendingRequests.delete(request.id);
+              resolver(data);
+            }
+          })
+          .catch(error => {
+            clearTimeout(timeout);
+            this.pendingRequests.delete(request.id);
+            reject(error);
+          });
+        } else {
+          clearTimeout(timeout);
+          this.pendingRequests.delete(request.id);
+          reject(new Error("No active connection"));
+        }
+      } catch (error) {
         clearTimeout(timeout);
-        resolve(response);
-      });
-
-      if (this.wsConnection && this.wsConnection.readyState === WebSocket.OPEN) {
-        this.wsConnection.send(JSON.stringify(message));
-      } else if (this.httpBaseUrl) {
-        this.sendHttpRequest(message).then(resolve).catch(reject);
-      } else {
-        reject(new Error('No active connection'));
+        this.pendingRequests.delete(request.id);
+        reject(error);
       }
     });
   }

@@ -691,3 +691,43 @@ pre {
   background-color: var(--border-default);
   margin: 0 var(--space-4);
 }
+
+input[type="text"], 
+input[type="number"], 
+input[type="url"], 
+input[type="email"], 
+textarea {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  -moz-user-select: text !important;
+  -ms-user-select: text !important;
+  cursor: text !important;
+}
+
+/* Ensure text selection works for specific classes */
+.select-text {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  -moz-user-select: text !important;
+  -ms-user-select: text !important;
+}
+
+/* Override any global no-select styles */
+* {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  -khtml-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
+}
+
+/* Specifically for buttons and interactive elements, disable selection */
+button, 
+.cursor-pointer,
+[role="button"] {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  -moz-user-select: none !important;
+  -ms-user-select: none !important;
+}

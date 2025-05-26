@@ -77,7 +77,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 			id: "prompts",
 			label: "Prompts",
 			icon: MessageSquare,
-			disabled: !isConnected,
+			disabled: !isConnected || availablePrompts.length === 0,
 			count: availablePrompts.length,
 			description: "Manage prompt templates",
 		},

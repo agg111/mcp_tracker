@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { MCPClient } from "../lib/MCPClient";
 import { Header } from "./layout/Header";
 import { Sidebar } from "./layout/Sidebar";
@@ -6,6 +6,7 @@ import { DashboardTab } from "./features/DashboardTab";
 import { ConnectionTab } from "./features/ConnectionTab";
 import { ToolsTab } from "./features/ToolsTab";
 import { ResourcesTab } from "./features/ResourcesTab";
+import { PromptsTab } from "./features/PromptsTab";
 import { LogsTab } from "./features/LogsTab";
 import { RawMessagesTab } from "./features/RawMessagesTab";
 import {
@@ -18,6 +19,7 @@ import {
 	RawMessage,
 	LogLevel,
 	LogDetails,
+	PromptResult,
 } from "../types";
 import {
 	scrollToBottom,
@@ -70,7 +72,8 @@ const MCPDashboard = () => {
 	const [promptInputs, setPromptInputs] = useState<
 		Record<string, string | number>
 	>({});
-	const [promptResult, setPromptResult] = useState<any | null>(null);
+	const [promptResults, setPromptResults] = useState<PromptResult[]>([]);
+	const [isExecutingPrompt, setIsExecutingPrompt] = useState(false);
 
 	// Logs and debugging
 	const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -284,6 +287,59 @@ const MCPDashboard = () => {
 		}
 	};
 
+	// Add the handleExecutePrompt function
+	const handleExecutePrompt = async () => {
+		if (!selectedPrompt || !mcpClient) return;
+
+		setIsExecutingPrompt(true);
+		const startTime = Date.now();
+
+		addLog("info", `Executing prompt: ${selectedPrompt.name}`, promptInputs);
+
+		try {
+			const result = await mcpClient.getPrompt(
+				selectedPrompt.name,
+				promptInputs
+			);
+			const duration = Date.now() - startTime;
+
+			const promptResult: PromptResult = {
+				id: Date.now(),
+				promptName: selectedPrompt.name,
+				inputs: { ...promptInputs },
+				timestamp: new Date().toISOString(),
+				status: "success",
+				duration,
+				result: result,
+				error: undefined,
+			};
+
+			setPromptResults((prev) => [promptResult, ...prev]);
+			addLog("success", `Prompt executed successfully: ${selectedPrompt.name}`);
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			const promptResult: PromptResult = {
+				id: Date.now(),
+				promptName: selectedPrompt.name,
+				inputs: { ...promptInputs },
+				timestamp: new Date().toISOString(),
+				status: "error",
+				duration,
+				result: null,
+				error: error instanceof Error ? error.message : String(error),
+			};
+
+			setPromptResults((prev) => [promptResult, ...prev]);
+			addLog(
+				"error",
+				`Prompt execution failed: ${selectedPrompt.name}`,
+				error as LogDetails
+			);
+		} finally {
+			setIsExecutingPrompt(false);
+		}
+	};
+
 	const handleResourceRead = async (resource: Resource) => {
 		if (!mcpClient) return;
 
@@ -366,6 +422,20 @@ const MCPDashboard = () => {
 						resourceContent={resourceContent}
 						setResourceContent={setResourceContent}
 						onResourceRead={handleResourceRead}
+					/>
+				);
+			case "prompts": // Add this case
+				return (
+					<PromptsTab
+						availablePrompts={availablePrompts}
+						selectedPrompt={selectedPrompt}
+						setSelectedPrompt={setSelectedPrompt}
+						promptInputs={promptInputs}
+						setPromptInputs={setPromptInputs}
+						promptResults={promptResults}
+						setPromptResults={setPromptResults}
+						isExecutingPrompt={isExecutingPrompt}
+						onExecutePrompt={handleExecutePrompt}
 					/>
 				);
 			case "logs":
